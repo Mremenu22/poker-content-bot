@@ -17,6 +17,246 @@ const client = new Client({
 
 const parser = new Parser();
 const CACHE_FILE = 'last_checked.json';
+const SESSION_FILE = 'patreon_session.json';
+
+class PatreonAPIClient {
+    constructor() {
+        this.sessionData = this.loadSession();
+        this.campaignId = null; // Will be discovered automatically
+    }
+
+    async discoverCampaignId() {
+        if (this.campaignId) return this.campaignId;
+        
+        try {
+            console.log('🔍 Discovering campaign ID...');
+            
+            // Method 1: Extract from page HTML
+            const response = await fetch('https://www.patreon.com/lowlimitcashgames');
+            const html = await response.text();
+            
+            const patterns = [
+                /"campaign_id":"(\d+)"/,
+                /"campaign":{"id":"(\d+)"/,
+                /campaign_id=(\d+)/,
+                /campaigns\/(\d+)/
+            ];
+            
+            for (const pattern of patterns) {
+                const match = html.match(pattern);
+                if (match) {
+                    this.campaignId = match[1];
+                    console.log('✅ Discovered campaign ID:', this.campaignId);
+                    return this.campaignId;
+                }
+            }
+            
+            console.log('⚠️ Could not auto-discover campaign ID');
+            return null;
+            
+        } catch (error) {
+            console.error('❌ Campaign ID discovery failed:', error.message);
+            return null;
+        }
+    }
+
+    loadSession() {
+        if (fs.existsSync(SESSION_FILE)) {
+            const data = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+            // Check if session is less than 6 hours old
+            if (Date.now() - data.timestamp < 6 * 60 * 60 * 1000) {
+                return data;
+            }
+        }
+        return null;
+    }
+
+    saveSession(cookies, csrfToken = null) {
+        const sessionData = {
+            cookies: cookies,
+            csrfToken: csrfToken,
+            timestamp: Date.now()
+        };
+        fs.writeFileSync(SESSION_FILE, JSON.stringify(sessionData, null, 2));
+        this.sessionData = sessionData;
+    }
+
+    async getPatreonPosts() {
+        try {
+            // Always discover campaign ID first
+            await this.discoverCampaignId();
+            
+            if (!this.campaignId) {
+                console.log('❌ No campaign ID available - skipping API methods');
+                return null;
+            }
+
+            // Method 1: Try posts endpoint
+            let posts = await this.tryPostsAPI();
+            if (posts && posts.length > 0) {
+                console.log('✅ Posts API method successful');
+                return posts;
+            }
+
+            // Method 2: Try campaign endpoint  
+            posts = await this.tryCampaignAPI();
+            if (posts && posts.length > 0) {
+                console.log('✅ Campaign API method successful');
+                return posts;
+            }
+
+            // Method 3: Try stream endpoint (doesn't need campaign ID)
+            posts = await this.tryStreamAPI();
+            if (posts && posts.length > 0) {
+                console.log('✅ Stream API method successful');
+                return posts;
+            }
+
+            console.log('⚠️ All API methods failed');
+            return null;
+
+        } catch (error) {
+            console.error('❌ API client error:', error.message);
+            return null;
+        }
+    }
+
+    async tryPostsAPI() {
+        const headers = this.getHeaders();
+        
+        try {
+            const response = await fetch(`https://www.patreon.com/api/posts?filter[campaign_id]=${this.campaignId}&sort=-published_at&page[count]=10&include=campaign,user`, {
+                headers: headers,
+                timeout: 10000
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                return this.parseAPIResponse(data);
+            }
+            
+            if (response.status === 403) {
+                console.log('🔄 Posts API session expired');
+            }
+            
+        } catch (error) {
+            console.log('⚠️ Posts API failed:', error.message);
+        }
+        
+        return null;
+    }
+
+    async tryCampaignAPI() {
+        const headers = this.getHeaders();
+        
+        try {
+            const response = await fetch(`https://www.patreon.com/api/campaigns/${this.campaignId}?include=posts&fields[post]=title,published_at,post_type,url`, {
+                headers: headers,
+                timeout: 10000
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (data.included) {
+                    return this.parseIncludedPosts(data.included);
+                }
+            }
+            
+        } catch (error) {
+            console.log('⚠️ Campaign API failed:', error.message);
+        }
+        
+        return null;
+    }
+
+    async tryStreamAPI() {
+        const headers = this.getHeaders();
+        
+        try {
+            const response = await fetch('https://www.patreon.com/api/stream?filter[is_following]=true&sort=-published_at&page[count]=10&include=user,campaign', {
+                headers: headers,
+                timeout: 10000
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                return this.parseAPIResponse(data);
+            }
+            
+        } catch (error) {
+            console.log('⚠️ Stream API failed:', error.message);
+        }
+        
+        return null;
+    }
+
+    getHeaders() {
+        const baseHeaders = {
+            'Accept': 'application/vnd.api+json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Cache-Control': 'no-cache',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://www.patreon.com/lowlimitcashgames',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin'
+        };
+
+        if (this.sessionData?.cookies) {
+            baseHeaders['Cookie'] = this.sessionData.cookies;
+        }
+
+        return baseHeaders;
+    }
+
+    parseAPIResponse(data) {
+        if (!data.data || !Array.isArray(data.data)) {
+            return [];
+        }
+
+        return data.data
+            .filter(post => post.type === 'post')
+            .map(post => ({
+                id: post.id,
+                title: post.attributes?.title || 'New Episode',
+                publishedAt: post.attributes?.published_at,
+                url: `https://www.patreon.com/posts/${post.id}`,
+                type: post.attributes?.post_type
+            }))
+            .filter(post => 
+                // Filter for likely episode content
+                post.title && (
+                    post.title.toLowerCase().includes('episode') ||
+                    post.title.toLowerCase().includes('poker') ||
+                    post.title.toLowerCase().includes('cash') ||
+                    post.type === 'audio_file' ||
+                    post.type === 'video_file'
+                )
+            );
+    }
+
+    parseIncludedPosts(included) {
+        return included
+            .filter(item => item.type === 'post')
+            .map(post => ({
+                id: post.id,
+                title: post.attributes?.title || 'New Episode',
+                publishedAt: post.attributes?.published_at,
+                url: `https://www.patreon.com/posts/${post.id}`,
+                type: post.attributes?.post_type
+            }))
+            .filter(post => 
+                post.title && (
+                    post.title.toLowerCase().includes('episode') ||
+                    post.title.toLowerCase().includes('poker')
+                )
+            );
+    }
+}
+
+// Initialize API client
+const patreonAPI = new PatreonAPIClient();
 
 function loadCache() {
     if (fs.existsSync(CACHE_FILE)) {
@@ -49,10 +289,12 @@ async function checkPublicRSS() {
         const channel = client.channels.cache.get(process.env.CHANNEL_ID);
         if (!channel) return;
 
+        console.log('📡 Checking RSS for free episodes...');
         const feed = await parser.parseURL(process.env.PODCAST_RSS_URL);
         const cache = loadCache();
         const lastCheck = new Date(cache.lastPodcastCheck);
         
+        let newEpisodes = 0;
         for (const item of feed.items) {
             const publishDate = new Date(item.pubDate);
             const episodeId = `public_${item.title.replace(/[^\w]/g, '_')}`;
@@ -67,7 +309,12 @@ async function checkPublicRSS() {
                 await thread.send(`**${item.title}**\n\n🆓 **Free Episode** - Available on all podcast platforms`);
                 console.log(`✅ Created thread for FREE episode: ${item.title}`);
                 cache.seenEpisodes.push(episodeId);
+                newEpisodes++;
             }
+        }
+        
+        if (newEpisodes === 0) {
+            console.log('📝 No new free episodes found');
         }
         
         cache.lastPodcastCheck = new Date().toISOString();
@@ -77,12 +324,62 @@ async function checkPublicRSS() {
     }
 }
 
-async function scrapePatreonPage() {
+async function checkPatreonAPI() {
     try {
         const channel = client.channels.cache.get(process.env.CHANNEL_ID);
         if (!channel) return;
 
-        console.log('🕷️ Scraping Patreon with modern techniques...');
+        console.log('🔍 Checking Patreon via API...');
+
+        // Try API methods first
+        let posts = await patreonAPI.getPatreonPosts();
+
+        if (!posts || posts.length === 0) {
+            console.log('⚠️ API methods failed, trying enhanced scraping...');
+            posts = await fallbackScraping();
+        }
+
+        if (posts && posts.length > 0) {
+            const cache = loadCache();
+            let newEpisodes = 0;
+
+            for (const post of posts) {
+                const episodeId = `patreon_${post.id}`;
+                
+                if (!cache.seenEpisodes.includes(episodeId)) {
+                    await createEpisodeThread(channel, post.title, post.url);
+                    cache.seenEpisodes.push(episodeId);
+                    newEpisodes++;
+                    console.log(`✅ Created thread for PAID episode: ${post.title}`);
+                    
+                    // Rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+
+            if (newEpisodes === 0) {
+                console.log('📝 No new paid episodes found');
+            }
+
+            // Clean up cache
+            if (cache.seenEpisodes.length > 50) {
+                cache.seenEpisodes = cache.seenEpisodes.slice(-50);
+            }
+
+            cache.lastPatreonCheck = new Date().toISOString();
+            saveCache(cache);
+        } else {
+            console.log('❌ No posts found with any method');
+        }
+
+    } catch (error) {
+        console.error('❌ Error checking Patreon API:', error.message);
+    }
+}
+
+async function fallbackScraping() {
+    try {
+        console.log('🕷️ Fallback scraping with enhanced headers...');
 
         const response = await fetch('https://www.patreon.com/lowlimitcashgames', {
             headers: {
@@ -92,8 +389,12 @@ async function scrapePatreonPage() {
                 'Accept-Encoding': 'gzip, deflate, br',
                 'DNT': '1',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            }
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none'
+            },
+            timeout: 15000
         });
         
         if (!response.ok) {
@@ -101,329 +402,139 @@ async function scrapePatreonPage() {
         }
         
         const html = await response.text();
-        const cache = loadCache();
         
-        console.log('🔍 Analyzing page for Next.js data structures...');
-        
-        // Method 1: Look for __NEXT_DATA__ (Next.js hydration data)
-        const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
-        if (nextDataMatch) {
-            console.log('📊 Found __NEXT_DATA__ - extracting post data...');
-            try {
-                const nextData = JSON.parse(nextDataMatch[1]);
-                const posts = await extractPostsFromNextData(nextData, channel, cache);
-                if (posts.length > 0) {
-                    console.log(`✅ Successfully found ${posts.length} posts from Next.js data`);
-                    return;
-                }
-            } catch (parseError) {
-                console.log(`⚠️ Failed to parse __NEXT_DATA__: ${parseError.message}`);
-            }
-        }
-        
-        // Method 2: Look for self.__next_f.push() calls (App Router)
-        const nextFMatches = html.match(/self\.__next_f\.push\(\[(.*?)\]\)/gs);
-        if (nextFMatches && nextFMatches.length > 0) {
-            console.log(`📊 Found ${nextFMatches.length} App Router data chunks - scanning...`);
-            
-            for (let i = 0; i < Math.min(nextFMatches.length, 20); i++) {
-                try {
-                    const match = nextFMatches[i];
-                    const jsonMatch = match.match(/self\.__next_f\.push\(\[.*?"(.*?)"\]\)/s);
-                    if (jsonMatch && jsonMatch[1]) {
-                        const unescapedJson = jsonMatch[1]
-                            .replace(/\\"/g, '"')
-                            .replace(/\\n/g, '\n')
-                            .replace(/\\r/g, '\r')
-                            .replace(/\\t/g, '\t')
-                            .replace(/\\\\/g, '\\');
-                        
-                        const posts = await extractPostsFromJsonChunk(unescapedJson, channel, cache);
-                        if (posts.length > 0) {
-                            console.log(`✅ Found ${posts.length} posts in App Router chunk ${i + 1}`);
-                            return;
-                        }
-                    }
-                } catch (parseError) {
-                    continue;
-                }
-            }
-        }
-        
-        // Method 3: Enhanced HTML pattern matching
-        console.log('🔍 Trying enhanced HTML pattern extraction...');
-        await enhancedHtmlExtraction(html, channel, cache);
-        
-    } catch (error) {
-        console.error('❌ Error scraping Patreon page:', error.message);
-    }
-}
-
-async function extractPostsFromNextData(nextData, channel, cache) {
-    console.log('🔍 Scanning Next.js data for posts...');
-    
-    try {
-        const searchPaths = [
-            nextData.props?.pageProps?.bootstrap?.campaign?.included,
-            nextData.props?.pageProps?.bootstrap?.posts,
-            nextData.props?.pageProps?.data?.posts,
-            nextData.props?.pageProps?.campaign?.posts,
-            nextData.props?.pageProps?.included,
-            nextData.props?.pageProps?.bootstrap?.data,
-            nextData.props?.pageProps?.initialReduxState?.posts,
-            nextData.props?.pageProps?.apolloState
+        // Enhanced pattern matching for posts
+        const patterns = [
+            /href="\/posts\/([a-zA-Z0-9\-_]+)"/g,
+            /\/posts\/([0-9]+)/g,
+            /"url":"\/posts\/([^"]+)"/g,
+            /patreon\.com\/posts\/([a-zA-Z0-9\-_]+)/g
         ];
         
-        for (const dataPath of searchPaths) {
-            if (Array.isArray(dataPath)) {
-                console.log(`📝 Checking array with ${dataPath.length} items...`);
-                
-                const posts = dataPath.filter(item => 
-                    item?.type === 'post' || 
-                    item?.attributes?.title ||
-                    item?.data?.attributes?.title ||
-                    (item?.id && item?.attributes)
-                );
-                
-                if (posts.length > 0) {
-                    console.log(`🎯 Found ${posts.length} posts in Next.js data!`);
-                    
-                    for (const post of posts.slice(0, 10)) {
-                        await processFoundPost(post, channel, cache);
-                    }
-                    
-                    return posts;
+        const foundSlugs = new Set();
+        
+        for (const pattern of patterns) {
+            const matches = [...html.matchAll(pattern)];
+            matches.forEach(match => {
+                if (match[1] && match[1].length > 2) {
+                    foundSlugs.add(match[1]);
                 }
-            } else if (dataPath && typeof dataPath === 'object') {
-                const postKeys = Object.keys(dataPath).filter(key => 
-                    key.includes('post') || key.includes('Post')
-                );
-                
-                if (postKeys.length > 0) {
-                    console.log(`📝 Found post-related keys: ${postKeys.join(', ')}`);
-                    for (const key of postKeys.slice(0, 5)) {
-                        const postData = dataPath[key];
-                        if (postData && typeof postData === 'object') {
-                            await processFoundPost(postData, channel, cache);
-                        }
-                    }
-                }
-            }
+            });
         }
         
-        console.log('⚠️ No posts found in Next.js data structure');
-        return [];
+        console.log(`📄 Fallback scraping found ${foundSlugs.size} potential posts`);
         
-    } catch (error) {
-        console.error('❌ Error extracting from Next.js data:', error.message);
-        return [];
-    }
-}
-
-async function extractPostsFromJsonChunk(jsonChunk, channel, cache) {
-    try {
-        const postIndicators = [
-            /"type":"post"/,
-            /"title":"[^"]+"/,
-            /posts\/\d+/,
-            /"url":"\/posts\/[^"]+"/,
-            /"post_id":/,
-            /"patreon\.com\/posts\//
-        ];
-        
-        const hasPostData = postIndicators.some(pattern => pattern.test(jsonChunk));
-        
-        if (hasPostData) {
-            console.log('🎯 Found post indicators in JSON chunk...');
-            
-            const urlMatches = jsonChunk.match(/"url":"\/posts\/([^"]+)"/g) || [];
-            const titleMatches = jsonChunk.match(/"title":"([^"]+)"/g) || [];
-            const postIdMatches = jsonChunk.match(/posts\/(\d+)/g) || [];
-            
-            const allMatches = [...urlMatches, ...postIdMatches];
-            
-            if (allMatches.length > 0) {
-                console.log(`📝 Extracting ${allMatches.length} potential posts...`);
-                
-                for (let i = 0; i < Math.min(allMatches.length, 10); i++) {
-                    let postSlug = null;
-                    let title = 'Low Limit Cash Games Episode';
-                    
-                    if (urlMatches[i]) {
-                        const urlMatch = urlMatches[i].match(/"url":"\/posts\/([^"]+)"/);
-                        if (urlMatch) postSlug = urlMatch[1];
-                    } else if (postIdMatches[i]) {
-                        const idMatch = postIdMatches[i].match(/posts\/(\d+)/);
-                        if (idMatch) postSlug = idMatch[1];
-                    }
-                    
-                    if (titleMatches[i]) {
-                        const titleMatch = titleMatches[i].match(/"title":"([^"]+)"/);
-                        if (titleMatch) {
-                            title = titleMatch[1]
-                                .replace(/\\u[\da-f]{4}/gi, '')
-                                .replace(/\\\//g, '/')
-                                .replace(/\\"/g, '"');
-                        }
-                    }
-                    
-                    if (postSlug) {
-                        await processFoundPost({
-                            id: postSlug,
-                            attributes: { title: title },
-                            url: `/posts/${postSlug}`
-                        }, channel, cache);
-                    }
-                }
-                
-                return allMatches;
-            }
-        }
-        
-        return [];
-        
-    } catch (error) {
-        console.error('❌ Error extracting from JSON chunk:', error.message);
-        return [];
-    }
-}
-
-async function enhancedHtmlExtraction(html, channel, cache) {
-    console.log('🔍 Enhanced HTML pattern matching...');
-    
-    const patterns = [
-        /href="\/posts\/([a-zA-Z0-9\-_]+)"/g,
-        /\/posts\/([0-9]+)/g,
-        /data-post-id="([^"]+)"/g,
-        /post-(\d+)/g,
-        /patreon\.com\/posts\/([a-zA-Z0-9\-_]+)/g
-    ];
-    
-    const foundSlugs = new Set();
-    
-    for (const pattern of patterns) {
-        const matches = [...html.matchAll(pattern)];
-        matches.forEach(match => {
-            if (match[1] && match[1].length > 2) {
-                foundSlugs.add(match[1]);
-            }
-        });
-    }
-    
-    console.log(`📄 HTML extraction found ${foundSlugs.size} unique post identifiers`);
-    
-    if (foundSlugs.size > 0) {
-        const slugArray = Array.from(foundSlugs).slice(0, 10);
-        
-        for (const slug of slugArray) {
-            await processFoundPost({
+        if (foundSlugs.size > 0) {
+            return Array.from(foundSlugs).slice(0, 10).map(slug => ({
                 id: slug,
-                attributes: { title: 'Low Limit Cash Games Episode' },
-                url: `/posts/${slug}`
-            }, channel, cache);
+                title: 'Low Limit Cash Games Episode',
+                url: `https://www.patreon.com/posts/${slug}`
+            }));
         }
         
-        return Array.from(foundSlugs);
-    }
-    
-    console.log('❌ No post identifiers found in HTML');
-    return [];
-}
-
-async function processFoundPost(post, channel, cache) {
-    try {
-        const postId = post.id || post.attributes?.post_id || post.attributes?.id || 'unknown';
-        const title = post.attributes?.title || post.data?.attributes?.title || 'Low Limit Cash Games Episode';
-        const postSlug = post.url?.replace('/posts/', '') || postId;
-        
-        const patreonPostUrl = `https://www.patreon.com/posts/${postSlug}`;
-        const episodeId = `patreon_${postSlug}`;
-        
-        console.log(`📝 Processing: "${title}" (${postSlug})`);
-        
-        if (!cache.seenEpisodes.includes(episodeId) && title.length > 3) {
-            console.log(`🆕 Creating thread for new episode: ${title}`);
-            
-            await createEpisodeThread(channel, title, patreonPostUrl);
-            console.log(`✅ Created thread: ${title}`);
-            console.log(`🔗 Link: ${patreonPostUrl}`);
-            
-            cache.seenEpisodes.push(episodeId);
-            
-            if (cache.seenEpisodes.length > 50) {
-                cache.seenEpisodes = cache.seenEpisodes.slice(-50);
-            }
-            
-            cache.lastPatreonCheck = new Date().toISOString();
-            saveCache(cache);
-        } else if (cache.seenEpisodes.includes(episodeId)) {
-            console.log(`✅ Already seen: ${title}`);
-        }
+        return [];
         
     } catch (error) {
-        console.error('❌ Error processing post:', error.message);
+        console.error('❌ Fallback scraping failed:', error.message);
+        return [];
     }
 }
 
 async function checkContent() {
     console.log('🔍 Checking for new content...');
-    console.log('📡 Checking RSS for free episodes...');
+    console.log(`📊 Using campaign ID: ${patreonAPI.campaignId || 'Not discovered yet'}`);
+    
+    // Check RSS first (faster)
     await checkPublicRSS();
-    console.log('🕷️ Scraping Patreon for paid episodes...');
-    await scrapePatreonPage();
+    
+    // Then check Patreon API/scraping
+    await checkPatreonAPI();
+    
     console.log('✅ Content check completed');
 }
 
 client.once('ready', async () => {
     console.log(`🤖 Bot logged in as ${client.user.tag}!`);
     
+    // Discover campaign ID on startup
+    const campaignId = await patreonAPI.discoverCampaignId();
+    
+    // Only send startup message in test channels, not production
     const channel = client.channels.cache.get(process.env.CHANNEL_ID);
-    if (channel) {
-        await channel.send('🚀 **Low Limit Cash Games bot is online!**\n🎧 Monitoring for new episodes with improved scraping\n📝 Type `!help` for commands');
+    const isTestChannel = channel && (
+        channel.name.toLowerCase().includes('test') || 
+        channel.name.toLowerCase().includes('bot') ||
+        process.env.NODE_ENV === 'development'
+    );
+    
+    if (channel && isTestChannel) {
+        await channel.send(`🚀 **Enhanced Low Limit Cash Games Bot Online!**\n⚡ Campaign ID: ${campaignId || 'Not Found'}\n📝 Type \`!help\` for commands`);
     }
     
-    cron.schedule('*/15 * * * *', checkContent);
+    // Log startup info to console (always visible in Railway logs)
+    console.log('🚀 Enhanced Low Limit Cash Games Bot is online!');
+    console.log(`📊 Campaign ID: ${campaignId || 'Not Found'}`);
+    console.log('🎧 Monitoring for new episodes with improved scraping');
+    console.log('📝 API-first approach with intelligent fallbacks');
+    console.log('⏰ Checking every 8 minutes');
     
+    // Check every 8 minutes for optimal balance
+    cron.schedule('*/8 * * * *', checkContent);
+    
+    // Initial check after 30 seconds
     setTimeout(() => {
         console.log('🚀 Starting initial content check...');
         checkContent();
-    }, 5000);
+    }, 30000);
 });
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     
-    console.log(`📝 Message: "${message.content}" in ${message.channel.name}`);
-    
-    if (message.content === '!test-format') {
-        const testTitle = 'Test Episode: Advanced Cash Game Strategy';
-        const testUrl = 'https://www.patreon.com/posts/test-12345';
-        
+    if (message.content === '!find-campaign-id') {
+        await message.reply('🔍 Searching for campaign ID...');
         try {
-            await createEpisodeThread(message.channel, testTitle, testUrl);
-            await message.reply('✅ Test thread created - check format!');
+            const campaignId = await patreonAPI.discoverCampaignId();
+            if (campaignId) {
+                await message.reply(`✅ Found campaign ID: ${campaignId}`);
+            } else {
+                await message.reply('❌ Could not find campaign ID automatically. Try checking browser dev tools.');
+            }
         } catch (error) {
-            await message.reply(`❌ Test failed: ${error.message}`);
+            await message.reply(`❌ Error: ${error.message}`);
         }
     }
     
-    if (message.content === '!test-patreon') {
-        await message.reply('🕷️ Testing Patreon scraping...');
+    if (message.content === '!test-api') {
+        await message.reply('🔍 Testing Patreon API methods...');
         try {
-            const originalChannelId = process.env.CHANNEL_ID;
-            process.env.CHANNEL_ID = message.channel.id;
-            
-            await scrapePatreonPage();
-            
-            process.env.CHANNEL_ID = originalChannelId;
-            await message.reply('✅ Patreon test completed - check logs');
+            const posts = await patreonAPI.getPatreonPosts();
+            if (posts && posts.length > 0) {
+                await message.reply(`✅ API working! Found ${posts.length} posts:\n${posts.map(p => `• ${p.title}`).join('\n').slice(0, 1500)}`);
+            } else {
+                await message.reply('❌ API methods failed - will use fallback scraping');
+            }
         } catch (error) {
-            await message.reply(`❌ Test failed: ${error.message}`);
+            await message.reply(`❌ API test failed: ${error.message}`);
+        }
+    }
+    
+    if (message.content === '!test-scraping') {
+        await message.reply('🕷️ Testing fallback scraping...');
+        try {
+            const posts = await fallbackScraping();
+            if (posts && posts.length > 0) {
+                await message.reply(`✅ Scraping found ${posts.length} potential posts`);
+            } else {
+                await message.reply('❌ Scraping found no posts');
+            }
+        } catch (error) {
+            await message.reply(`❌ Scraping test failed: ${error.message}`);
         }
     }
     
     if (message.content === '!test-rss') {
-        await message.reply('🔍 Testing RSS feed...');
+        await message.reply('📡 Testing RSS feed...');
         try {
             const originalChannelId = process.env.CHANNEL_ID;
             process.env.CHANNEL_ID = message.channel.id;
@@ -437,8 +548,8 @@ client.on('messageCreate', async (message) => {
         }
     }
     
-    if (message.content === '!test-both') {
-        await message.reply('🔍 Testing full content check...');
+    if (message.content === '!force-check') {
+        await message.reply('🔍 Force checking all content sources...');
         try {
             const originalChannelId = process.env.CHANNEL_ID;
             process.env.CHANNEL_ID = message.channel.id;
@@ -446,9 +557,9 @@ client.on('messageCreate', async (message) => {
             await checkContent();
             
             process.env.CHANNEL_ID = originalChannelId;
-            await message.reply('✅ Full test completed');
+            await message.reply('✅ Force check completed');
         } catch (error) {
-            await message.reply(`❌ Test failed: ${error.message}`);
+            await message.reply(`❌ Force check failed: ${error.message}`);
         }
     }
     
@@ -460,7 +571,7 @@ client.on('messageCreate', async (message) => {
                 seenEpisodes: []
             };
             saveCache(cache);
-            await message.reply('🗑️ Cache cleared');
+            await message.reply('🗑️ Cache cleared - will re-detect recent episodes');
         } catch (error) {
             await message.reply(`❌ Cache clear failed: ${error.message}`);
         }
@@ -468,9 +579,11 @@ client.on('messageCreate', async (message) => {
     
     if (message.content === '!status') {
         const cache = loadCache();
+        const campaignId = patreonAPI.campaignId || 'Not Found';
+        
         await message.reply({
             embeds: [{
-                title: 'Bot Status',
+                title: 'Enhanced Bot Status',
                 fields: [
                     {
                         name: '📡 Last RSS Check',
@@ -478,13 +591,28 @@ client.on('messageCreate', async (message) => {
                         inline: true
                     },
                     {
-                        name: '🕷️ Last Patreon Check', 
+                        name: '🔍 Last Patreon Check',
                         value: new Date(cache.lastPatreonCheck).toLocaleString(),
                         inline: true
                     },
                     {
                         name: '📚 Episodes Tracked',
                         value: `${cache.seenEpisodes.length} episodes`,
+                        inline: true
+                    },
+                    {
+                        name: '🆔 Campaign ID',
+                        value: campaignId,
+                        inline: true
+                    },
+                    {
+                        name: '⚡ Check Frequency',
+                        value: 'Every 8 minutes',
+                        inline: true
+                    },
+                    {
+                        name: '🛠️ Methods',
+                        value: 'API → Scraping → RSS',
                         inline: true
                     }
                 ],
@@ -514,31 +642,31 @@ client.on('messageCreate', async (message) => {
     if (message.content === '!help') {
         await message.reply({
             embeds: [{
-                title: '🤖 Low Limit Cash Games Bot',
-                description: 'Commands for testing and management:',
+                title: '🤖 Enhanced Low Limit Cash Games Bot',
+                description: 'Advanced automation with multiple detection methods:',
                 fields: [
                     {
-                        name: '!test-format',
-                        value: 'Create test thread with proper formatting',
+                        name: '!test-api',
+                        value: 'Test Patreon API methods',
                         inline: false
                     },
                     {
-                        name: '!test-patreon',
-                        value: 'Test Patreon scraping (safe - current channel)', 
+                        name: '!test-scraping',
+                        value: 'Test fallback scraping method',
                         inline: false
                     },
                     {
                         name: '!test-rss',
-                        value: 'Test RSS feed parsing',
+                        value: 'Test RSS feed for free episodes',
                         inline: false
                     },
                     {
-                        name: '!test-both',
-                        value: 'Run complete content check',
+                        name: '!force-check',
+                        value: 'Run immediate content check',
                         inline: false
                     },
                     {
-                        name: '!post Title Here URL',
+                        name: '!post Title URL',
                         value: 'Manually post episode',
                         inline: false
                     },
@@ -549,11 +677,14 @@ client.on('messageCreate', async (message) => {
                     },
                     {
                         name: '!status',
-                        value: 'Show bot status and stats',
+                        value: 'Show detailed bot status',
                         inline: false
                     }
                 ],
-                color: 0x1DB954
+                color: 0x1DB954,
+                footer: {
+                    text: 'Checks every 8 minutes • API-first approach'
+                }
             }]
         });
     }
