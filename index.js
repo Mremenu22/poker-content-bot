@@ -94,7 +94,7 @@ class PatreonAPIClient {
             // Method 1: Try posts endpoint
             let posts = await this.tryPostsAPI();
             if (posts && posts.length > 0) {
-                console.log('✅ Posts API method successful');
+                console.log(`✅ Posts API method successful - found ${posts.length} posts`);
                 return posts;
             }
 
@@ -230,46 +230,52 @@ class PatreonAPIClient {
 
     parseAPIResponse(data) {
         if (!data.data || !Array.isArray(data.data)) {
+            console.log('❌ No data array in API response');
             return [];
         }
 
-        return data.data
+        console.log(`🔍 Processing ${data.data.length} items from API response`);
+        
+        const posts = data.data
             .filter(post => post.type === 'post')
-            .map(post => ({
-                id: post.id,
-                title: post.attributes?.title || 'New Episode',
-                publishedAt: post.attributes?.published_at,
-                url: `https://www.patreon.com/posts/${post.id}`,
-                type: post.attributes?.post_type
-            }))
-            .filter(post => 
-                // Filter for likely episode content
-                post.title && (
-                    post.title.toLowerCase().includes('episode') ||
-                    post.title.toLowerCase().includes('poker') ||
-                    post.title.toLowerCase().includes('cash') ||
-                    post.type === 'audio_file' ||
-                    post.type === 'video_file'
-                )
-            );
+            .map(post => {
+                const title = post.attributes?.title || 'Untitled Post';
+                const publishedAt = post.attributes?.published_at;
+                const postType = post.attributes?.post_type;
+                
+                console.log(`📄 Found post: "${title}" (${postType}) - ${post.id}`);
+                
+                return {
+                    id: post.id,
+                    title: title,
+                    publishedAt: publishedAt,
+                    url: `https://www.patreon.com/posts/${post.id}`,
+                    type: postType
+                };
+            });
+
+        console.log(`🎯 Total posts to process: ${posts.length}`);
+        return posts;
     }
 
     parseIncludedPosts(included) {
-        return included
+        const posts = included
             .filter(item => item.type === 'post')
-            .map(post => ({
-                id: post.id,
-                title: post.attributes?.title || 'New Episode',
-                publishedAt: post.attributes?.published_at,
-                url: `https://www.patreon.com/posts/${post.id}`,
-                type: post.attributes?.post_type
-            }))
-            .filter(post => 
-                post.title && (
-                    post.title.toLowerCase().includes('episode') ||
-                    post.title.toLowerCase().includes('poker')
-                )
-            );
+            .map(post => {
+                const title = post.attributes?.title || 'Untitled Post';
+                console.log(`📄 Found included post: "${title}" - ${post.id}`);
+                
+                return {
+                    id: post.id,
+                    title: title,
+                    publishedAt: post.attributes?.published_at,
+                    url: `https://www.patreon.com/posts/${post.id}`,
+                    type: post.attributes?.post_type
+                };
+            });
+
+        console.log(`🎯 Total included posts: ${posts.length}`);
+        return posts;
     }
 }
 
@@ -368,10 +374,12 @@ async function checkPatreonAPI() {
                     await createEpisodeThread(channel, post.title, post.url);
                     cache.seenEpisodes.push(episodeId);
                     newEpisodes++;
-                    console.log(`✅ Created thread for PAID episode: ${post.title}`);
+                    console.log(`✅ Created thread: "${post.title}" - ${post.url}`);
                     
                     // Rate limiting
                     await new Promise(resolve => setTimeout(resolve, 1000));
+                } else {
+                    console.log(`⏭️ Already posted: "${post.title}"`);
                 }
             }
 
@@ -517,6 +525,24 @@ client.once('ready', async () => {
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
+    
+    if (message.content === '!show-all-posts') {
+        await message.reply('🔍 Fetching ALL posts from Brett\'s Patreon...');
+        try {
+            const posts = await patreonAPI.getPatreonPosts();
+            if (posts && posts.length > 0) {
+                const postList = posts.slice(0, 10).map(post => 
+                    `• **${post.title}**\n  ${post.url}\n  Type: ${post.type || 'unknown'}`
+                ).join('\n\n');
+                
+                await message.reply(`✅ Found ${posts.length} posts:\n\n${postList.slice(0, 1800)}`);
+            } else {
+                await message.reply('❌ No posts found');
+            }
+        } catch (error) {
+            await message.reply(`❌ Error: ${error.message}`);
+        }
+    }
     
     if (message.content === '!find-campaign-id') {
         await message.reply('🔍 Searching for campaign ID...');
