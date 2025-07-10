@@ -174,8 +174,10 @@ async function checkAppleRSSForDetails() {
 
 async function checkContent() {
     console.log('🔍 Checking for new content...');
-    await checkPodcast(); // Check Spreaker RSS for public episodes
-    await scrapePatreonPage(); // Scrape Patreon page for all episodes
+    console.log('📡 Checking Spreaker RSS for public episodes...');
+    await checkPodcast();
+    console.log('🕷️ Scraping Patreon page for all episodes...');
+    await scrapePatreonPage();
     console.log('✅ Content check completed');
 }
 
@@ -185,14 +187,17 @@ client.once('ready', async () => {
     // Send startup message
     const channel = client.channels.cache.get(process.env.CHANNEL_ID);
     if (channel) {
-        await channel.send('🚀 **Bot Online!**');
+        await channel.send('🚀 **Enhanced poker content bot is online!**');
     }
     
     // Schedule checks every 15 minutes
     cron.schedule('*/15 * * * *', checkContent);
     
-    // Initial check after 10 seconds
-    setTimeout(checkContent, 10000);
+    // Initial check after 5 seconds
+    setTimeout(() => {
+        console.log('🚀 Starting initial content check...');
+        checkContent();
+    }, 5000);
 });
 
 // Handle graceful shutdown
