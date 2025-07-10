@@ -47,6 +47,12 @@ function getEpisodeLinks(episodeTitle, episodeIds = null) {
         }
     }
     
+    // Log the actual links being generated
+    console.log(`🔗 Generated links for "${episodeTitle}":`);
+    console.log(`   🍎 Apple: ${appleLink}`);
+    console.log(`   🎵 Spotify: ${spotifyLink}`);
+    console.log(`   📊 Direct links: ${!!(episodeIds?.apple || episodeIds?.spotify)}`);
+    
     return {
         apple: appleLink,
         spotify: spotifyLink,
@@ -192,8 +198,16 @@ async function scrapePatreonPage() {
                     await createEpisodeThread(channel, title, links, true, patreonPostUrl);
                     console.log(`✅ Created thread for Patreon episode: ${title}`);
                     console.log(`🔗 Patreon post: ${patreonPostUrl}`);
+                    
+                    // Show the actual clickable links for verification
+                    console.log(`📲 COPY THESE LINKS TO TEST:`);
+                    console.log(`   Apple Podcasts: ${links.apple}`);
+                    console.log(`   Spotify: ${links.spotify}`);
+                    
                     if (episodeIds.apple || episodeIds.spotify) {
                         console.log(`🎯 Found episode IDs - Apple: ${episodeIds.apple}, Spotify: ${episodeIds.spotify}`);
+                    } else {
+                        console.log(`⚠️  Using generic show links (no episode IDs found)`);
                     }
                     
                     // Add to seen episodes
@@ -273,6 +287,7 @@ async function findEpisodeIds(episodeTitle, postSlug) {
                 );
                 if (match && match.trackId) {
                     console.log(`🍎 Found Apple Podcasts episode ID: ${match.trackId}`);
+                    console.log(`📱 Full episode data: ${match.trackName} - ${match.trackViewUrl}`);
                     return {
                         apple: match.trackId,
                         spotify: null // We'll try to find Spotify ID separately
