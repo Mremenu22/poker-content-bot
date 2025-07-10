@@ -33,20 +33,24 @@ function saveCache(cache) {
     fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
 }
 
-function getEpisodeLinks(episodeTitle, episodeId = null) {
-    // Direct episode links that work for connected patrons
+function getEpisodeLinks(episodeTitle, episodeIds = null) {
+    // Try to create direct episode links if we have IDs
     let appleLink = 'https://podcasts.apple.com/us/podcast/low-limit-cash-games/id1496651303';
     let spotifyLink = 'https://open.spotify.com/show/2ycOlKRTGA9ugMmIIjqjSE';
     
-    // If we can extract episode ID from scraping, create direct episode links
-    if (episodeId) {
-        appleLink = `https://podcasts.apple.com/us/podcast/low-limit-cash-games/id1496651303?i=${episodeId}`;
-        spotifyLink = `https://open.spotify.com/episode/${episodeId}`;
+    if (episodeIds) {
+        if (episodeIds.apple) {
+            appleLink = `https://podcasts.apple.com/us/podcast/low-limit-cash-games/id1496651303?i=${episodeIds.apple}`;
+        }
+        if (episodeIds.spotify) {
+            spotifyLink = `https://open.spotify.com/episode/${episodeIds.spotify}`;
+        }
     }
     
     return {
         apple: appleLink,
-        spotify: spotifyLink
+        spotify: spotifyLink,
+        isDirect: !!(episodeIds?.apple || episodeIds?.spotify)
     };
 }
 
@@ -84,9 +88,15 @@ async function checkPodcast() {
             const episodeId = `public_${item.title.replace(/[^\w]/g, '_')}`;
             
             if (publishDate > lastCheck && !cache.seenEpisodes.includes(episodeId)) {
-                const links = getEpisodeLinks(item.title);
+                // For public episodes, try to get specific episode IDs from RSS
+                const episodeIds = await extractEpisodeIdsFromRSS(item);
+                const links = getEpisodeLinks(item.title, episodeIds);
+                
                 await createEpisodeThread(channel, item.title, links, false);
                 console.log(`✅ Created thread for public episode: ${item.title}`);
+                if (links.isDirect) {
+                    console.log(`🎯 Using direct episode links`);
+                }
                 
                 // Add to seen episodes
                 cache.seenEpisodes.push(episodeId);
@@ -119,12 +129,49 @@ async function scrapePatreonPage() {
         const html = await response.text();
         const cache = loadCache();
         
-        // Look for post links and titles
-        // Pattern: href="/posts/episode-title-12345" or similar
+        console.log('🔍 Analyzing Patreon page structure...');
+        
+        // Try to find structured data (JSON-LD or embedded data)
+        const jsonMatches = html.match(/<script[^>]*type="application\/json"[^>]*>(.*?)<\/script>/gs);
+        const jsonLdMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>(.*?)<\/script>/gs);
+        
+        if (jsonMatches || jsonLdMatches) {
+            console.log('📊 Found structured data, parsing...');
+            
+            // Try to parse JSON data for episode information
+            const allJsonData = [...(jsonMatches || []), ...(jsonLdMatches || [])];
+            
+            for (const jsonScript of allJsonData) {
+                try {
+                    const jsonContent = jsonScript.replace(/<script[^>]*>/, '').replace(/<\/script>/, '');
+                    const data = JSON.parse(jsonContent);
+                    
+                    // Look for episode/post data in various possible structures
+                    if (data.props?.pageProps?.bootstrap?.post) {
+                        const post = data.props.pageProps.bootstrap.post;
+                        await processPatreonPost(post, channel, cache);
+                    } else if (data.props?.pageProps?.bootstrap?.campaign?.posts) {
+                        const posts = data.props.pageProps.bootstrap.campaign.posts;
+                        for (const post of posts) {
+                            await processPatreonPost(post, channel, cache);
+                        }
+                    } else if (data['@type'] === 'PodcastEpisode' || data.episodeNumber) {
+                        await processStructuredEpisodeData(data, channel, cache);
+                    }
+                } catch (parseError) {
+                    // Continue to next JSON block if this one fails to parse
+                    continue;
+                }
+            }
+        }
+        
+        // Fallback: Look for post links and titles in HTML
         const postLinkMatches = html.match(/href="\/posts\/([^"]+)"/g);
-        const titleMatches = html.match(/data-tag="post-title"[^>]*>([^<]+)</g);
+        const titleMatches = html.match(/data-tag="post-title"[^>]*>([^<]+)/g);
         
         if (postLinkMatches && titleMatches) {
+            console.log(`📝 Found ${postLinkMatches.length} posts via HTML parsing`);
+            
             for (let i = 0; i < Math.min(postLinkMatches.length, titleMatches.length); i++) {
                 const postMatch = postLinkMatches[i];
                 const titleMatch = titleMatches[i];
@@ -138,10 +185,16 @@ async function scrapePatreonPage() {
                 
                 // Check if this is a new episode we haven't seen
                 if (title.length > 10 && !cache.seenEpisodes.includes(episodeId)) {
-                    const links = getEpisodeLinks(title);
+                    // Try to get episode IDs by searching RSS feeds or making additional requests
+                    const episodeIds = await findEpisodeIds(title, postSlug);
+                    const links = getEpisodeLinks(title, episodeIds);
+                    
                     await createEpisodeThread(channel, title, links, true, patreonPostUrl);
                     console.log(`✅ Created thread for Patreon episode: ${title}`);
                     console.log(`🔗 Patreon post: ${patreonPostUrl}`);
+                    if (episodeIds.apple || episodeIds.spotify) {
+                        console.log(`🎯 Found episode IDs - Apple: ${episodeIds.apple}, Spotify: ${episodeIds.spotify}`);
+                    }
                     
                     // Add to seen episodes
                     cache.seenEpisodes.push(episodeId);
@@ -149,7 +202,7 @@ async function scrapePatreonPage() {
             }
         }
         
-        // Keep only last 50 seen episodes to prevent cache from growing too large
+        // Keep only last 50 seen episodes
         if (cache.seenEpisodes.length > 50) {
             cache.seenEpisodes = cache.seenEpisodes.slice(-50);
         }
@@ -162,13 +215,118 @@ async function scrapePatreonPage() {
     }
 }
 
-async function checkAppleRSSForDetails() {
+async function processPatreonPost(post, channel, cache) {
+    if (!post.attributes || !post.attributes.title) return;
+    
+    const title = post.attributes.title;
+    const postId = post.id;
+    const episodeId = `patreon_${postId}`;
+    
+    if (!cache.seenEpisodes.includes(episodeId)) {
+        const patreonPostUrl = `https://www.patreon.com/posts/${postId}`;
+        const episodeIds = await findEpisodeIds(title, postId);
+        const links = getEpisodeLinks(title, episodeIds);
+        
+        await createEpisodeThread(channel, title, links, true, patreonPostUrl);
+        console.log(`✅ Created thread for structured Patreon episode: ${title}`);
+        
+        cache.seenEpisodes.push(episodeId);
+    }
+}
+
+async function processStructuredEpisodeData(data, channel, cache) {
+    const title = data.name || data.title;
+    if (!title) return;
+    
+    const episodeId = `structured_${title.replace(/[^\w]/g, '_')}`;
+    
+    if (!cache.seenEpisodes.includes(episodeId)) {
+        const episodeIds = {
+            apple: data.url?.find(url => url.includes('apple.com'))?.split('i=')[1],
+            spotify: data.url?.find(url => url.includes('spotify.com'))?.split('/episode/')[1]
+        };
+        
+        const links = getEpisodeLinks(title, episodeIds);
+        await createEpisodeThread(channel, title, links, true);
+        console.log(`✅ Created thread for structured episode: ${title}`);
+        
+        cache.seenEpisodes.push(episodeId);
+    }
+}
+
+async function findEpisodeIds(episodeTitle, postSlug) {
+    console.log(`🔍 Searching for episode IDs for: ${episodeTitle}`);
+    
     try {
-        // If you have a working Apple RSS URL, we can use it to get episode details
-        // For now, we'll rely on the scraping approach
-        console.log('Apple RSS check placeholder - using scraping for detection');
+        // Method 1: Search Apple Podcasts API (if available)
+        // Note: Apple doesn't have a public search API, but we can try iTunes Search
+        const cleanTitle = encodeURIComponent(episodeTitle.substring(0, 50));
+        const itunesSearchUrl = `https://itunes.apple.com/search?term=${cleanTitle}+Low+Limit+Cash+Games&entity=podcastEpisode&limit=5`;
+        
+        const itunesResponse = await fetch(itunesSearchUrl);
+        if (itunesResponse.ok) {
+            const itunesData = await itunesResponse.json();
+            if (itunesData.results && itunesData.results.length > 0) {
+                // Look for matching episode
+                const match = itunesData.results.find(result => 
+                    result.trackName && result.trackName.toLowerCase().includes(episodeTitle.toLowerCase().substring(0, 20))
+                );
+                if (match && match.trackId) {
+                    console.log(`🍎 Found Apple Podcasts episode ID: ${match.trackId}`);
+                    return {
+                        apple: match.trackId,
+                        spotify: null // We'll try to find Spotify ID separately
+                    };
+                }
+            }
+        }
+        
+        // Method 2: Try to extract from RSS if we have a working one
+        // This would require the working Apple RSS URL
+        
+        console.log(`⚠️  Could not find specific episode IDs for: ${episodeTitle}`);
+        return { apple: null, spotify: null };
+        
     } catch (error) {
-        console.error('❌ Error checking Apple RSS:', error.message);
+        console.error(`❌ Error finding episode IDs: ${error.message}`);
+        return { apple: null, spotify: null };
+    }
+}
+
+async function extractEpisodeIdsFromRSS(rssItem) {
+    try {
+        // RSS items often contain episode URLs or IDs in various fields
+        let appleId = null;
+        let spotifyId = null;
+        
+        // Look for iTunes episode ID in RSS item
+        if (rssItem.itunes && rssItem.itunes.episode) {
+            appleId = rssItem.itunes.episode;
+        }
+        
+        // Look for episode URLs in enclosure or link fields
+        if (rssItem.enclosure && rssItem.enclosure.url) {
+            // Sometimes episode IDs are in the URL
+            const urlMatch = rssItem.enclosure.url.match(/episode[_-]?(\d+)/i);
+            if (urlMatch) {
+                appleId = urlMatch[1];
+            }
+        }
+        
+        // Look in GUID for episode identifiers
+        if (rssItem.guid) {
+            const guidMatch = rssItem.guid.match(/(\d{10,})/);
+            if (guidMatch) {
+                appleId = guidMatch[1];
+            }
+        }
+        
+        console.log(`🔍 Extracted episode IDs from RSS - Apple: ${appleId}, Spotify: ${spotifyId}`);
+        return { apple: appleId, spotify: spotifyId };
+        
+    } catch (error) {
+        console.error(`❌ Error extracting episode IDs from RSS: ${error.message}`);
+        return { apple: null, spotify: null };
     }
 }
 
@@ -187,7 +345,7 @@ client.once('ready', async () => {
     // Send startup message
     const channel = client.channels.cache.get(process.env.CHANNEL_ID);
     if (channel) {
-        await channel.send('🚀 **Enhanced poker content bot is online!**');
+        await channel.send('🚀 **Enhanced poker content bot is online!**\n📡 Now monitoring both public episodes and Patreon content');
     }
     
     // Schedule checks every 15 minutes
