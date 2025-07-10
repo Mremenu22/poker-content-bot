@@ -125,18 +125,28 @@ class PatreonAPIClient {
         const headers = this.getHeaders();
         
         try {
-            const response = await fetch(`https://www.patreon.com/api/posts?filter[campaign_id]=${this.campaignId}&sort=-published_at&page[count]=10&include=campaign,user`, {
+            const url = `https://www.patreon.com/api/posts?filter[campaign_id]=${this.campaignId}&sort=-published_at&page[count]=10&include=campaign,user`;
+            console.log(`🔗 Trying posts API: ${url}`);
+            
+            const response = await fetch(url, {
                 headers: headers,
                 timeout: 10000
             });
 
+            console.log(`📡 Posts API response: ${response.status} ${response.statusText}`);
+
             if (response.ok) {
                 const data = await response.json();
+                console.log(`📊 Posts API returned ${data.data ? data.data.length : 0} items`);
                 return this.parseAPIResponse(data);
             }
             
             if (response.status === 403) {
                 console.log('🔄 Posts API session expired');
+            } else if (response.status === 404) {
+                console.log('❌ Posts API: Campaign not found or no access');
+            } else {
+                console.log(`❌ Posts API failed with status: ${response.status}`);
             }
             
         } catch (error) {
@@ -173,14 +183,22 @@ class PatreonAPIClient {
         const headers = this.getHeaders();
         
         try {
-            const response = await fetch('https://www.patreon.com/api/stream?filter[is_following]=true&sort=-published_at&page[count]=10&include=user,campaign', {
+            const url = 'https://www.patreon.com/api/stream?filter[is_following]=true&sort=-published_at&page[count]=10&include=user,campaign';
+            console.log(`🔗 Trying stream API: ${url}`);
+            
+            const response = await fetch(url, {
                 headers: headers,
                 timeout: 10000
             });
 
+            console.log(`📡 Stream API response: ${response.status} ${response.statusText}`);
+
             if (response.ok) {
                 const data = await response.json();
+                console.log(`📊 Stream API returned ${data.data ? data.data.length : 0} items`);
                 return this.parseAPIResponse(data);
+            } else {
+                console.log(`❌ Stream API failed with status: ${response.status}`);
             }
             
         } catch (error) {
@@ -397,11 +415,14 @@ async function fallbackScraping() {
             timeout: 15000
         });
         
+        console.log(`🌐 Scraping response: ${response.status} ${response.statusText}`);
+        
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         
         const html = await response.text();
+        console.log(`📄 HTML length: ${html.length} characters`);
         
         // Enhanced pattern matching for posts
         const patterns = [
@@ -413,8 +434,11 @@ async function fallbackScraping() {
         
         const foundSlugs = new Set();
         
-        for (const pattern of patterns) {
+        for (let i = 0; i < patterns.length; i++) {
+            const pattern = patterns[i];
             const matches = [...html.matchAll(pattern)];
+            console.log(`🔍 Pattern ${i + 1} found ${matches.length} matches`);
+            
             matches.forEach(match => {
                 if (match[1] && match[1].length > 2) {
                     foundSlugs.add(match[1]);
@@ -422,10 +446,13 @@ async function fallbackScraping() {
             });
         }
         
-        console.log(`📄 Fallback scraping found ${foundSlugs.size} potential posts`);
+        console.log(`📄 Fallback scraping found ${foundSlugs.size} unique post identifiers`);
         
         if (foundSlugs.size > 0) {
-            return Array.from(foundSlugs).slice(0, 10).map(slug => ({
+            const slugs = Array.from(foundSlugs).slice(0, 10);
+            console.log(`📝 Post slugs found: ${slugs.join(', ')}`);
+            
+            return slugs.map(slug => ({
                 id: slug,
                 title: 'Low Limit Cash Games Episode',
                 url: `https://www.patreon.com/posts/${slug}`
