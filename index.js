@@ -25,7 +25,7 @@ return JSON.parse(fs.readFileSync(CACHE_FILE, ‘utf8’));
 return {
 lastPodcastCheck: new Date().toISOString(),
 lastPatreonCheck: new Date().toISOString(),
-seenEpisodes: [] // Track episodes we’ve already posted
+seenEpisodes: []
 };
 }
 
@@ -34,17 +34,14 @@ fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
 }
 
 async function createEpisodeThread(channel, title, patreonPostUrl) {
-// Create the thread with episode title - NO auto-archive
 const thread = await channel.threads.create({
 name: title,
-autoArchiveDuration: null, // Never auto-archive
+autoArchiveDuration: null,
 reason: ‘New poker episode discussion’
 });
 
 ```
-// Minimal message: just title and link
 const message = `**${title}**\n\n${patreonPostUrl}`;
-
 await thread.send(message);
 return thread;
 ```
@@ -66,17 +63,15 @@ if (!channel) return;
         const episodeId = `public_${item.title.replace(/[^\w]/g, '_')}`;
         
         if (publishDate > lastCheck && !cache.seenEpisodes.includes(episodeId)) {
-            // For public episodes, create a simple thread (no platform links needed per Brett)
             const thread = await channel.threads.create({
                 name: item.title,
-                autoArchiveDuration: null, // Never auto-archive
+                autoArchiveDuration: null,
                 reason: 'New free poker episode'
             });
             
             await thread.send(`**${item.title}**\n\n🆓 **Free Episode** - Available on all podcast platforms`);
             console.log(`✅ Created thread for FREE episode: ${item.title}`);
             
-            // Add to seen episodes
             cache.seenEpisodes.push(episodeId);
         }
     }
@@ -96,18 +91,11 @@ const channel = client.channels.cache.get(process.env.CHANNEL_ID);
 if (!channel) return;
 
 ```
-    console.log('🕷️ Scraping Brett\'s Patreon page with updated patterns...');
+    console.log('🕷️ Scraping Patreon page with updated patterns...');
 
-    // Scrape Brett's public Patreon page
     const response = await fetch('https://www.patreon.com/lowlimitcashgames', {
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
     });
     
@@ -120,7 +108,7 @@ if (!channel) return;
     
     console.log('🔍 Modern Patreon scraping - looking for Next.js data structures...');
     
-    // Method 1: Look for __NEXT_DATA__ (Next.js hydration data)
+    // Method 1: Look for __NEXT_DATA__
     const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
     if (nextDataMatch) {
         console.log('📊 Found __NEXT_DATA__ - parsing Next.js hydration data...');
@@ -132,11 +120,11 @@ if (!channel) return;
                 return;
             }
         } catch (parseError) {
-            console.log(`⚠️  Failed to parse __NEXT_DATA__: ${parseError.message}`);
+            console.log(`⚠️ Failed to parse __NEXT_DATA__: ${parseError.message}`);
         }
     }
     
-    // Method 2: Look for self.__next_f.push() calls (newer Next.js App Router)
+    // Method 2: Look for self.__next_f.push() calls
     const nextFMatches = html.match(/self\.__next_f\.push\(\[(.*?)\]\)/gs);
     if (nextFMatches && nextFMatches.length > 0) {
         console.log(`📊 Found ${nextFMatches.length} self.__next_f.push() calls - parsing App Router data...`);
@@ -144,10 +132,8 @@ if (!channel) return;
         for (let i = 0; i < nextFMatches.length; i++) {
             try {
                 const match = nextFMatches[i];
-                // Extract the JSON content inside the push call
                 const jsonMatch = match.match(/self\.__next_f\.push\(\[.*?"(.*?)"\]\)/s);
                 if (jsonMatch && jsonMatch[1]) {
-                    // Unescape the JSON string
                     const unescapedJson = jsonMatch[1]
                         .replace(/\\"/g, '"')
                         .replace(/\\n/g, '\n')
@@ -155,7 +141,6 @@ if (!channel) return;
                         .replace(/\\t/g, '\t')
                         .replace(/\\\\/g, '\\');
                     
-                    // Look for post data in this chunk
                     const posts = await extractPostsFromJsonChunk(unescapedJson, channel, cache);
                     if (posts.length > 0) {
                         console.log(`✅ Successfully extracted ${posts.length} posts from App Router data chunk ${i + 1}`);
@@ -163,7 +148,7 @@ if (!channel) return;
                     }
                 }
             } catch (parseError) {
-                console.log(`⚠️  Failed to parse App Router chunk ${i + 1}: ${parseError.message}`);
+                console.log(`⚠️ Failed to parse App Router chunk ${i + 1}: ${parseError.message}`);
                 continue;
             }
         }
@@ -180,13 +165,11 @@ if (!channel) return;
 
 }
 
-// Extract posts from Next.js **NEXT_DATA**
 async function extractPostsFromNextData(nextData, channel, cache) {
 console.log(‘🔍 Searching for posts in Next.js data structure…’);
 
 ```
 try {
-    // Common paths where post data might be found
     const possiblePaths = [
         nextData.props?.pageProps?.bootstrap?.campaign?.included,
         nextData.props?.pageProps?.bootstrap?.posts,
@@ -208,7 +191,7 @@ try {
             if (posts.length > 0) {
                 console.log(`🎯 Found ${posts.length} posts in Next.js data!`);
                 
-                for (const post of posts.slice(0, 10)) { // Limit to prevent spam
+                for (const post of posts.slice(0, 10)) {
                     await processFoundPost(post, channel, cache);
                 }
                 
@@ -217,7 +200,7 @@ try {
         }
     }
     
-    console.log('⚠️  No posts found in __NEXT_DATA__ structure');
+    console.log('⚠️ No posts found in __NEXT_DATA__ structure');
     return [];
     
 } catch (error) {
@@ -228,10 +211,8 @@ try {
 
 }
 
-// Extract posts from JSON chunks in App Router calls
 async function extractPostsFromJsonChunk(jsonChunk, channel, cache) {
 try {
-// Look for post-like objects in the JSON chunk
 const postPatterns = [
 /“type”:“post”/g,
 /“title”:”[^”]+”/g,
@@ -242,13 +223,11 @@ const postPatterns = [
 ```
     let foundPosts = [];
     
-    // Check if this chunk contains post data
     const hasPostData = postPatterns.some(pattern => pattern.test(jsonChunk));
     
     if (hasPostData) {
         console.log('🎯 Found post data in JSON chunk, extracting...');
         
-        // Try to extract post URLs and titles
         const urlMatches = jsonChunk.match(/"url":"\/posts\/([^"]+)"/g);
         const titleMatches = jsonChunk.match(/"title":"([^"]+)"/g);
         
@@ -261,7 +240,7 @@ const postPatterns = [
                 
                 if (urlMatch && titleMatch) {
                     const postSlug = urlMatch[1];
-                    const title = titleMatch[1].replace(/\\u[\da-f]{4}/gi, ''); // Remove unicode escapes
+                    const title = titleMatch[1].replace(/\\u[\da-f]{4}/gi, '');
                     
                     await processFoundPost({
                         id: postSlug,
@@ -285,23 +264,16 @@ const postPatterns = [
 
 }
 
-// Enhanced fallback HTML scraping
 async function fallbackHtmlScraping(html, channel, cache) {
 console.log(‘🔍 Enhanced HTML fallback scraping…’);
 
 ```
-// More comprehensive patterns for 2024/2025 Patreon structure
 const enhancedPatterns = [
-    // API endpoint patterns
     /api\/posts\/(\d+)/g,
     /\/posts\/([a-zA-Z0-9\-_]+)/g,
-    // Data attribute patterns
     /data-post-id="([^"]+)"/g,
     /data-href="\/posts\/([^"]+)"/g,
-    // Next.js link patterns
-    /href="\/posts\/([^"]+)"/g,
-    // JSON-LD structured data
-    /"@type":\s*"BlogPosting".*?"url":\s*"[^"]*\/posts\/([^"]+)"/g
+    /href="\/posts\/([^"]+)"/g
 ];
 
 let allPostSlugs = new Set();
@@ -309,7 +281,7 @@ let allPostSlugs = new Set();
 for (const pattern of enhancedPatterns) {
     const matches = [...html.matchAll(pattern)];
     matches.forEach(match => {
-        if (match[1] && match[1].length > 3) { // Valid post slug
+        if (match[1] && match[1].length > 3) {
             allPostSlugs.add(match[1]);
         }
     });
@@ -318,7 +290,6 @@ for (const pattern of enhancedPatterns) {
 console.log(`📄 Enhanced HTML parsing found ${allPostSlugs.size} unique post slugs`);
 
 if (allPostSlugs.size > 0) {
-    // Convert to array and process first 10
     const slugArray = Array.from(allPostSlugs).slice(0, 10);
     
     for (const slug of slugArray) {
@@ -335,7 +306,6 @@ if (allPostSlugs.size > 0) {
 
 }
 
-// Process a found post (common function)
 async function processFoundPost(post, channel, cache) {
 try {
 const postId = post.id || post.attributes?.post_id || ‘unknown’;
@@ -348,7 +318,6 @@ const postSlug = post.url?.replace(’/posts/’, ‘’) || postId;
     
     console.log(`📝 Processing: "${title}" (${postSlug})`);
     
-    // Check if this is a new episode we haven't seen
     if (!cache.seenEpisodes.includes(episodeId) && title.length > 5) {
         console.log(`🆕 Creating thread for new episode: ${title}`);
         
@@ -356,10 +325,8 @@ const postSlug = post.url?.replace(’/posts/’, ‘’) || postId;
         console.log(`✅ Created thread for episode: ${title}`);
         console.log(`🔗 Patreon link: ${patreonPostUrl}`);
         
-        // Add to seen episodes
         cache.seenEpisodes.push(episodeId);
         
-        // Keep only last 50 seen episodes
         if (cache.seenEpisodes.length > 50) {
             cache.seenEpisodes = cache.seenEpisodes.slice(-50);
         }
@@ -369,79 +336,11 @@ const postSlug = post.url?.replace(’/posts/’, ‘’) || postId;
     } else if (cache.seenEpisodes.includes(episodeId)) {
         console.log(`✅ Already seen: ${title}`);
     } else {
-        console.log(`⚠️  Skipping short title: ${title}`);
+        console.log(`⚠️ Skipping short title: ${title}`);
     }
     
 } catch (error) {
     console.error('❌ Error processing found post:', error.message);
-}
-```
-
-}) continue;
-
-```
-        const patreonPostUrl = `https://www.patreon.com/posts/${postSlug}`;
-        const episodeId = `patreon_${postSlug}`;
-        
-        console.log(`📝 Found: "${title}" (${postSlug})`);
-        
-        // Check if this is a new episode we haven't seen
-        if (!cache.seenEpisodes.includes(episodeId)) {
-            console.log(`🆕 Processing new Patreon episode: ${title}`);
-            
-            await createEpisodeThread(channel, title, patreonPostUrl);
-            console.log(`✅ Created thread for PATREON episode: ${title}`);
-            console.log(`🔗 Patreon link: ${patreonPostUrl}`);
-            
-            // Add to seen episodes
-            cache.seenEpisodes.push(episodeId);
-        } else {
-            console.log(`✅ Already seen: ${title}`);
-        }
-    }
-    
-    // If HTML parsing failed, try a more aggressive approach
-    if (uniquePosts.length === 0) {
-        console.log('🔍 HTML parsing failed, trying alternative approach...');
-        
-        // Look for any URL patterns that might be posts
-        const urlMatches = html.match(/patreon\.com\/posts\/[a-zA-Z0-9\-_]+/g);
-        if (urlMatches && urlMatches.length > 0) {
-            console.log(`📄 Found ${urlMatches.length} post URLs via alternative method`);
-            
-            // Take first few unique URLs
-            const uniqueUrls = [...new Set(urlMatches)].slice(0, 5);
-            
-            for (const fullUrl of uniqueUrls) {
-                const postSlug = fullUrl.split('/posts/')[1];
-                const episodeId = `patreon_${postSlug}`;
-                
-                if (!cache.seenEpisodes.includes(episodeId)) {
-                    // Use a generic title since we can't extract it
-                    const title = `New Low Limit Cash Games Episode`;
-                    const patreonPostUrl = `https://www.patreon.com/posts/${postSlug}`;
-                    
-                    await createEpisodeThread(channel, title, patreonPostUrl);
-                    console.log(`✅ Created thread for episode: ${patreonPostUrl}`);
-                    
-                    cache.seenEpisodes.push(episodeId);
-                }
-            }
-        } else {
-            console.log('❌ No post URLs found via any method');
-        }
-    }
-    
-    // Keep only last 50 seen episodes
-    if (cache.seenEpisodes.length > 50) {
-        cache.seenEpisodes = cache.seenEpisodes.slice(-50);
-    }
-    
-    cache.lastPatreonCheck = new Date().toISOString();
-    saveCache(cache);
-    
-} catch (error) {
-    console.error('❌ Error scraping Patreon page:', error.message);
 }
 ```
 
@@ -460,16 +359,13 @@ client.once(‘ready’, async () => {
 console.log(`🤖 Bot logged in as ${client.user.tag}!`);
 
 ```
-// Send startup message
 const channel = client.channels.cache.get(process.env.CHANNEL_ID);
 if (channel) {
     await channel.send('🚀 **Low Limit Cash Games bot is online!**\n🎧 Now monitoring for new episodes - Patreon links only for paid content\n📝 Type `!help` for test commands');
 }
 
-// Schedule checks every 15 minutes
 cron.schedule('*/15 * * * *', checkContent);
 
-// Initial check after 5 seconds
 setTimeout(() => {
     console.log('🚀 Starting initial content check...');
     checkContent();
@@ -478,13 +374,10 @@ setTimeout(() => {
 
 });
 
-// Test commands and message handling
 client.on(‘messageCreate’, async (message) => {
-// Ignore bot messages
 if (message.author.bot) return;
 
 ```
-// Log all messages for debugging
 console.log(`📝 Message received: "${message.content}" in channel: ${message.channel.name} (${message.channel.id})`);
 
 if (message.content === '!test-format') {
@@ -502,13 +395,12 @@ if (message.content === '!test-format') {
 if (message.content === '!test-patreon') {
     await message.reply('🕷️ Testing Patreon scraping...');
     try {
-        // For testing, we'll use the current channel instead of production channel
         const originalChannelId = process.env.CHANNEL_ID;
-        process.env.CHANNEL_ID = message.channel.id; // Temporarily use test channel
+        process.env.CHANNEL_ID = message.channel.id;
         
         await scrapePatreonPage();
         
-        process.env.CHANNEL_ID = originalChannelId; // Restore original
+        process.env.CHANNEL_ID = originalChannelId;
         await message.reply('✅ Patreon scrape completed - check logs for details');
     } catch (error) {
         await message.reply(`❌ Patreon test failed: ${error.message}`);
@@ -518,13 +410,12 @@ if (message.content === '!test-patreon') {
 if (message.content === '!test-rss') {
     await message.reply('🔍 Testing RSS feed...');
     try {
-        // For testing, we'll use the current channel instead of production channel
         const originalChannelId = process.env.CHANNEL_ID;
-        process.env.CHANNEL_ID = message.channel.id; // Temporarily use test channel
+        process.env.CHANNEL_ID = message.channel.id;
         
         await checkPublicRSS();
         
-        process.env.CHANNEL_ID = originalChannelId; // Restore original
+        process.env.CHANNEL_ID = originalChannelId;
         await message.reply('✅ RSS check completed - check logs for details');
     } catch (error) {
         await message.reply(`❌ RSS test failed: ${error.message}`);
@@ -534,13 +425,12 @@ if (message.content === '!test-rss') {
 if (message.content === '!test-both') {
     await message.reply('🔍 Testing full content check...');
     try {
-        // For testing, we'll use the current channel instead of production channel
         const originalChannelId = process.env.CHANNEL_ID;
-        process.env.CHANNEL_ID = message.channel.id; // Temporarily use test channel
+        process.env.CHANNEL_ID = message.channel.id;
         
         await checkContent();
         
-        process.env.CHANNEL_ID = originalChannelId; // Restore original
+        process.env.CHANNEL_ID = originalChannelId;
         await message.reply('✅ Full content check completed');
     } catch (error) {
         await message.reply(`❌ Content check failed: ${error.message}`);
@@ -594,7 +484,7 @@ if (message.content === '!status') {
     });
 }
 
-if (message.content === '!post' || message.content.startsWith('!post ')) {
+if (message.content.startsWith('!post ')) {
     const parts = message.content.split(' ');
     if (parts.length >= 3) {
         const title = parts.slice(1, -1).join(' ');
@@ -661,7 +551,6 @@ if (message.content === '!help') {
 
 });
 
-// Handle graceful shutdown
 process.on(‘SIGINT’, () => {
 console.log(‘🛑 Bot shutting down…’);
 client.destroy();
