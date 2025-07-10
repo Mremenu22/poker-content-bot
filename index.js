@@ -143,37 +143,55 @@ async function scrapePatreonPage() {
         
         if (jsonMatches || jsonLdMatches) {
             console.log('📊 Found structured data, parsing...');
+            console.log(`   📄 Found ${(jsonMatches || []).length} JSON scripts`);
+            console.log(`   📄 Found ${(jsonLdMatches || []).length} JSON-LD scripts`);
             
             // Try to parse JSON data for episode information
             const allJsonData = [...(jsonMatches || []), ...(jsonLdMatches || [])];
             
-            for (const jsonScript of allJsonData) {
+            for (let i = 0; i < allJsonData.length; i++) {
                 try {
+                    const jsonScript = allJsonData[i];
                     const jsonContent = jsonScript.replace(/<script[^>]*>/, '').replace(/<\/script>/, '');
                     const data = JSON.parse(jsonContent);
                     
+                    console.log(`   🔍 Parsing JSON block ${i + 1}...`);
+                    
                     // Look for episode/post data in various possible structures
                     if (data.props?.pageProps?.bootstrap?.post) {
+                        console.log(`   📝 Found single post data`);
                         const post = data.props.pageProps.bootstrap.post;
                         await processPatreonPost(post, channel, cache);
                     } else if (data.props?.pageProps?.bootstrap?.campaign?.posts) {
+                        console.log(`   📝 Found campaign posts data`);
                         const posts = data.props.pageProps.bootstrap.campaign.posts;
+                        console.log(`   📊 Processing ${posts.length} posts from structured data`);
                         for (const post of posts) {
                             await processPatreonPost(post, channel, cache);
                         }
                     } else if (data['@type'] === 'PodcastEpisode' || data.episodeNumber) {
+                        console.log(`   🎧 Found podcast episode structured data`);
                         await processStructuredEpisodeData(data, channel, cache);
+                    } else {
+                        console.log(`   ⚠️  JSON block ${i + 1} doesn't contain recognizable episode data`);
+                        // Log first few keys to help debug structure
+                        const keys = Object.keys(data).slice(0, 5);
+                        console.log(`   🔑 Available keys: ${keys.join(', ')}`);
                     }
                 } catch (parseError) {
-                    // Continue to next JSON block if this one fails to parse
+                    console.log(`   ❌ Failed to parse JSON block ${i + 1}: ${parseError.message}`);
                     continue;
                 }
             }
         }
         
         // Fallback: Look for post links and titles in HTML
+        console.log('🔍 Trying HTML fallback parsing...');
         const postLinkMatches = html.match(/href="\/posts\/([^"]+)"/g);
         const titleMatches = html.match(/data-tag="post-title"[^>]*>([^<]+)/g);
+        
+        console.log(`   📄 Found ${(postLinkMatches || []).length} post links`);
+        console.log(`   📝 Found ${(titleMatches || []).length} titles`);
         
         if (postLinkMatches && titleMatches) {
             console.log(`📝 Found ${postLinkMatches.length} posts via HTML parsing`);
@@ -187,10 +205,13 @@ async function scrapePatreonPage() {
                 const title = titleMatch.replace(/data-tag="post-title"[^>]*>/, '').trim();
                 const patreonPostUrl = `https://www.patreon.com/posts/${postSlug}`;
                 
+                console.log(`   📝 Found post: "${title}" (${postSlug})`);
+                
                 const episodeId = `patreon_${postSlug}`;
                 
                 // Check if this is a new episode we haven't seen
                 if (title.length > 10 && !cache.seenEpisodes.includes(episodeId)) {
+                    console.log(`   🆕 Processing new episode: ${title}`);
                     // Try to get episode IDs by searching RSS feeds or making additional requests
                     const episodeIds = await findEpisodeIds(title, postSlug);
                     const links = getEpisodeLinks(title, episodeIds);
@@ -212,8 +233,14 @@ async function scrapePatreonPage() {
                     
                     // Add to seen episodes
                     cache.seenEpisodes.push(episodeId);
+                } else if (cache.seenEpisodes.includes(episodeId)) {
+                    console.log(`   ✅ Already seen episode: ${title}`);
+                } else {
+                    console.log(`   ⚠️  Skipping short title: ${title}`);
                 }
             }
+        } else {
+            console.log('   ❌ No post links or titles found in HTML');
         }
         
         // Keep only last 50 seen episodes
@@ -230,13 +257,21 @@ async function scrapePatreonPage() {
 }
 
 async function processPatreonPost(post, channel, cache) {
-    if (!post.attributes || !post.attributes.title) return;
+    console.log(`   🔍 Processing post data...`);
+    
+    if (!post.attributes || !post.attributes.title) {
+        console.log(`   ⚠️  Post missing title or attributes`);
+        return;
+    }
     
     const title = post.attributes.title;
     const postId = post.id;
     const episodeId = `patreon_${postId}`;
     
+    console.log(`   📝 Found post: "${title}" (ID: ${postId})`);
+    
     if (!cache.seenEpisodes.includes(episodeId)) {
+        console.log(`   🆕 Processing new post: ${title}`);
         const patreonPostUrl = `https://www.patreon.com/posts/${postId}`;
         const episodeIds = await findEpisodeIds(title, postId);
         const links = getEpisodeLinks(title, episodeIds);
@@ -244,7 +279,14 @@ async function processPatreonPost(post, channel, cache) {
         await createEpisodeThread(channel, title, links, true, patreonPostUrl);
         console.log(`✅ Created thread for structured Patreon episode: ${title}`);
         
+        // Show the actual clickable links for verification
+        console.log(`📲 COPY THESE LINKS TO TEST:`);
+        console.log(`   Apple Podcasts: ${links.apple}`);
+        console.log(`   Spotify: ${links.spotify}`);
+        
         cache.seenEpisodes.push(episodeId);
+    } else {
+        console.log(`   ✅ Already seen post: ${title}`);
     }
 }
 
