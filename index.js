@@ -185,7 +185,7 @@ client.once('ready', async () => {
     // Send startup message
     const channel = client.channels.cache.get(process.env.CHANNEL_ID);
     if (channel) {
-        await channel.send('🚀 **Enhanced poker content bot is online!**\n📡 Now monitoring both public episodes and Patreon content');
+        await channel.send('🚀 **Bot Online!**');
     }
     
     // Schedule checks every 15 minutes
