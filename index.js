@@ -33,68 +33,22 @@ function saveCache(cache) {
     fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
 }
 
-function getEpisodeLinks(episodeTitle, episodeIds = null, isPatreonOnly = false, patreonPostUrl = null) {
-    if (isPatreonOnly && patreonPostUrl) {
-        // For Patreon episodes: ONLY provide the Patreon link
-        console.log(`🔗 Patreon episode "${episodeTitle}": ${patreonPostUrl}`);
-        return {
-            patreon: patreonPostUrl,
-            type: 'patreon'
-        };
-    } else {
-        // For free episodes: provide Spotify and Apple links
-        let appleLink = 'https://podcasts.apple.com/us/podcast/low-limit-cash-games/id1496651303';
-        let spotifyLink = 'https://open.spotify.com/show/2ycOlKRTGA9ugMmIIjqjSE';
-        
-        if (episodeIds) {
-            if (episodeIds.apple) {
-                appleLink = `https://podcasts.apple.com/us/podcast/low-limit-cash-games/id1496651303?i=${episodeIds.apple}`;
-            }
-            if (episodeIds.spotify) {
-                spotifyLink = `https://open.spotify.com/episode/${episodeIds.spotify}`;
-            }
-        }
-        
-        console.log(`🔗 Free episode "${episodeTitle}":`);
-        console.log(`   🍎 Apple: ${appleLink}`);
-        console.log(`   🎵 Spotify: ${spotifyLink}`);
-        
-        return {
-            apple: appleLink,
-            spotify: spotifyLink,
-            type: 'free',
-            isDirect: !!(episodeIds?.apple || episodeIds?.spotify)
-        };
-    }
-}
-
-async function createEpisodeThread(channel, title, links, isPatreonOnly = false, patreonPostUrl = null) {
-    // Create the thread with episode title
+async function createEpisodeThread(channel, title, patreonPostUrl) {
+    // Create the thread with episode title - NO auto-archive
     const thread = await channel.threads.create({
         name: title,
-        autoArchiveDuration: 1440, // 24 hours
+        autoArchiveDuration: null, // Never auto-archive
         reason: 'New poker episode discussion'
     });
 
-    let message = `**${title}**\n\n`;
-    
-    if (isPatreonOnly && links.type === 'patreon') {
-        // Patreon exclusive episode - ONLY show Patreon link
-        message += `🔒 **Patreon Exclusive**\n`;
-        message += `🎧 **Listen Now:** ${links.patreon}\n\n`;
-        message += `*Click the link above → "Listen in app" → Spotify*`;
-    } else {
-        // Free episode - show Spotify and Apple links
-        message += `🆓 **Free Episode**\n\n`;
-        message += `🍎 **Apple Podcasts**\n${links.apple}\n\n`;
-        message += `🎵 **Spotify**\n${links.spotify}`;
-    }
+    // Minimal message: just title and link
+    const message = `**${title}**\n\n${patreonPostUrl}`;
 
     await thread.send(message);
     return thread;
 }
 
-async function checkPodcast() {
+async function checkPublicRSS() {
     try {
         const channel = client.channels.cache.get(process.env.CHANNEL_ID);
         if (!channel) return;
@@ -108,15 +62,15 @@ async function checkPodcast() {
             const episodeId = `public_${item.title.replace(/[^\w]/g, '_')}`;
             
             if (publishDate > lastCheck && !cache.seenEpisodes.includes(episodeId)) {
-                // For public episodes, get Spotify/Apple links
-                const episodeIds = await extractEpisodeIdsFromRSS(item);
-                const links = getEpisodeLinks(item.title, episodeIds, false); // false = not Patreon only
+                // For public episodes, create a simple thread (no platform links needed per Brett)
+                const thread = await channel.threads.create({
+                    name: item.title,
+                    autoArchiveDuration: null, // Never auto-archive
+                    reason: 'New free poker episode'
+                });
                 
-                await createEpisodeThread(channel, item.title, links, false); // false = not Patreon only
+                await thread.send(`**${item.title}**\n\n🆓 **Free Episode** - Available on all podcast platforms`);
                 console.log(`✅ Created thread for FREE episode: ${item.title}`);
-                if (links.isDirect) {
-                    console.log(`🎯 Using direct episode links`);
-                }
                 
                 // Add to seen episodes
                 cache.seenEpisodes.push(episodeId);
@@ -149,101 +103,100 @@ async function scrapePatreonPage() {
         const html = await response.text();
         const cache = loadCache();
         
-        console.log('🔍 Analyzing Patreon page structure...');
+        console.log('🔍 Analyzing Patreon page for episodes...');
         
-        // Try to find structured data (JSON-LD or embedded data)
-        const jsonMatches = html.match(/<script[^>]*type="application\/json"[^>]*>(.*?)<\/script>/gs);
-        const jsonLdMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>(.*?)<\/script>/gs);
+        // Look for post links in multiple possible formats
+        const patterns = [
+            /href="\/posts\/([^"]+)"/g,
+            /\/posts\/([a-zA-Z0-9\-_]+)/g,
+            /"url":"\/posts\/([^"]+)"/g
+        ];
         
-        if (jsonMatches || jsonLdMatches) {
-            console.log('📊 Found structured data, parsing...');
-            console.log(`   📄 Found ${(jsonMatches || []).length} JSON scripts`);
-            console.log(`   📄 Found ${(jsonLdMatches || []).length} JSON-LD scripts`);
+        let allPostMatches = [];
+        
+        for (const pattern of patterns) {
+            const matches = [...html.matchAll(pattern)];
+            allPostMatches = allPostMatches.concat(matches);
+        }
+        
+        // Remove duplicates
+        const uniquePosts = [...new Set(allPostMatches.map(match => match[1]))];
+        
+        console.log(`📄 Found ${uniquePosts.length} potential posts`);
+        
+        // Look for titles in various formats
+        const titlePatterns = [
+            /data-tag="post-title"[^>]*>([^<]+)/g,
+            /"title":"([^"]+)"/g,
+            /<h[1-6][^>]*>([^<]*(?:episode|cash|game|poker)[^<]*)<\/h[1-6]>/gi
+        ];
+        
+        let allTitles = [];
+        
+        for (const pattern of titlePatterns) {
+            const matches = [...html.matchAll(pattern)];
+            allTitles = allTitles.concat(matches.map(match => match[1]));
+        }
+        
+        console.log(`📝 Found ${allTitles.length} potential titles`);
+        
+        // Process posts - try to match posts with titles
+        for (let i = 0; i < Math.min(uniquePosts.length, allTitles.length, 10); i++) {
+            const postSlug = uniquePosts[i];
+            const title = allTitles[i]?.trim();
             
-            // Try to parse JSON data for episode information
-            const allJsonData = [...(jsonMatches || []), ...(jsonLdMatches || [])];
+            if (!title || title.length < 5) continue;
             
-            for (let i = 0; i < allJsonData.length; i++) {
-                try {
-                    const jsonScript = allJsonData[i];
-                    const jsonContent = jsonScript.replace(/<script[^>]*>/, '').replace(/<\/script>/, '');
-                    const data = JSON.parse(jsonContent);
-                    
-                    console.log(`   🔍 Parsing JSON block ${i + 1}...`);
-                    
-                    // Look for episode/post data in various possible structures
-                    if (data.props?.pageProps?.bootstrap?.post) {
-                        console.log(`   📝 Found single post data`);
-                        const post = data.props.pageProps.bootstrap.post;
-                        await processPatreonPost(post, channel, cache);
-                    } else if (data.props?.pageProps?.bootstrap?.campaign?.posts) {
-                        console.log(`   📝 Found campaign posts data`);
-                        const posts = data.props.pageProps.bootstrap.campaign.posts;
-                        console.log(`   📊 Processing ${posts.length} posts from structured data`);
-                        for (const post of posts) {
-                            await processPatreonPost(post, channel, cache);
-                        }
-                    } else if (data['@type'] === 'PodcastEpisode' || data.episodeNumber) {
-                        console.log(`   🎧 Found podcast episode structured data`);
-                        await processStructuredEpisodeData(data, channel, cache);
-                    } else {
-                        console.log(`   ⚠️  JSON block ${i + 1} doesn't contain recognizable episode data`);
-                        // Log first few keys to help debug structure
-                        const keys = Object.keys(data).slice(0, 5);
-                        console.log(`   🔑 Available keys: ${keys.join(', ')}`);
-                    }
-                } catch (parseError) {
-                    console.log(`   ❌ Failed to parse JSON block ${i + 1}: ${parseError.message}`);
-                    continue;
-                }
+            const patreonPostUrl = `https://www.patreon.com/posts/${postSlug}`;
+            const episodeId = `patreon_${postSlug}`;
+            
+            console.log(`📝 Found: "${title}" (${postSlug})`);
+            
+            // Check if this is a new episode we haven't seen
+            if (!cache.seenEpisodes.includes(episodeId)) {
+                console.log(`🆕 Processing new Patreon episode: ${title}`);
+                
+                await createEpisodeThread(channel, title, patreonPostUrl);
+                console.log(`✅ Created thread for PATREON episode: ${title}`);
+                console.log(`🔗 Patreon link: ${patreonPostUrl}`);
+                
+                // Add to seen episodes
+                cache.seenEpisodes.push(episodeId);
+            } else {
+                console.log(`✅ Already seen: ${title}`);
             }
         }
         
-        // Fallback: Look for post links and titles in HTML
-        console.log('🔍 Trying HTML fallback parsing...');
-        const postLinkMatches = html.match(/href="\/posts\/([^"]+)"/g);
-        const titleMatches = html.match(/data-tag="post-title"[^>]*>([^<]+)/g);
-        
-        console.log(`   📄 Found ${(postLinkMatches || []).length} post links`);
-        console.log(`   📝 Found ${(titleMatches || []).length} titles`);
-        
-        if (postLinkMatches && titleMatches) {
-            console.log(`📝 Found ${postLinkMatches.length} posts via HTML parsing`);
+        // If HTML parsing failed, try a more aggressive approach
+        if (uniquePosts.length === 0) {
+            console.log('🔍 HTML parsing failed, trying alternative approach...');
             
-            for (let i = 0; i < Math.min(postLinkMatches.length, titleMatches.length); i++) {
-                const postMatch = postLinkMatches[i];
-                const titleMatch = titleMatches[i];
+            // Look for any URL patterns that might be posts
+            const urlMatches = html.match(/patreon\.com\/posts\/[a-zA-Z0-9\-_]+/g);
+            if (urlMatches && urlMatches.length > 0) {
+                console.log(`📄 Found ${urlMatches.length} post URLs via alternative method`);
                 
-                // Extract post slug and title
-                const postSlug = postMatch.match(/href="\/posts\/([^"]+)"/)[1];
-                const title = titleMatch.replace(/data-tag="post-title"[^>]*>/, '').trim();
-                const patreonPostUrl = `https://www.patreon.com/posts/${postSlug}`;
+                // Take first few unique URLs
+                const uniqueUrls = [...new Set(urlMatches)].slice(0, 5);
                 
-                console.log(`   📝 Found post: "${title}" (${postSlug})`);
-                
-                const episodeId = `patreon_${postSlug}`;
-                
-                // Check if this is a new episode we haven't seen
-                if (title.length > 10 && !cache.seenEpisodes.includes(episodeId)) {
-                    console.log(`   🆕 Processing new Patreon episode: ${title}`);
+                for (const fullUrl of uniqueUrls) {
+                    const postSlug = fullUrl.split('/posts/')[1];
+                    const episodeId = `patreon_${postSlug}`;
                     
-                    // For Patreon episodes, ONLY use Patreon link
-                    const links = getEpisodeLinks(title, null, true, patreonPostUrl); // true = Patreon only
-                    
-                    await createEpisodeThread(channel, title, links, true, patreonPostUrl); // true = Patreon only
-                    console.log(`✅ Created thread for PATREON episode: ${title}`);
-                    console.log(`🔗 Patreon post: ${patreonPostUrl}`);
-                    
-                    // Add to seen episodes
-                    cache.seenEpisodes.push(episodeId);
-                } else if (cache.seenEpisodes.includes(episodeId)) {
-                    console.log(`   ✅ Already seen episode: ${title}`);
-                } else {
-                    console.log(`   ⚠️  Skipping short title: ${title}`);
+                    if (!cache.seenEpisodes.includes(episodeId)) {
+                        // Use a generic title since we can't extract it
+                        const title = `New Low Limit Cash Games Episode`;
+                        const patreonPostUrl = `https://www.patreon.com/posts/${postSlug}`;
+                        
+                        await createEpisodeThread(channel, title, patreonPostUrl);
+                        console.log(`✅ Created thread for episode: ${patreonPostUrl}`);
+                        
+                        cache.seenEpisodes.push(episodeId);
+                    }
                 }
+            } else {
+                console.log('❌ No post URLs found via any method');
             }
-        } else {
-            console.log('   ❌ No post links or titles found in HTML');
         }
         
         // Keep only last 50 seen episodes
@@ -259,136 +212,11 @@ async function scrapePatreonPage() {
     }
 }
 
-async function processPatreonPost(post, channel, cache) {
-    console.log(`   🔍 Processing post data...`);
-    
-    if (!post.attributes || !post.attributes.title) {
-        console.log(`   ⚠️  Post missing title or attributes`);
-        return;
-    }
-    
-    const title = post.attributes.title;
-    const postId = post.id;
-    const episodeId = `patreon_${postId}`;
-    
-    console.log(`   📝 Found post: "${title}" (ID: ${postId})`);
-    
-    if (!cache.seenEpisodes.includes(episodeId)) {
-        console.log(`   🆕 Processing new Patreon post: ${title}`);
-        const patreonPostUrl = `https://www.patreon.com/posts/${postId}`;
-        
-        // For Patreon posts, ONLY use Patreon link
-        const links = getEpisodeLinks(title, null, true, patreonPostUrl); // true = Patreon only
-        
-        await createEpisodeThread(channel, title, links, true, patreonPostUrl); // true = Patreon only
-        console.log(`✅ Created thread for structured Patreon episode: ${title}`);
-        
-        cache.seenEpisodes.push(episodeId);
-    } else {
-        console.log(`   ✅ Already seen post: ${title}`);
-    }
-}
-
-async function processStructuredEpisodeData(data, channel, cache) {
-    const title = data.name || data.title;
-    if (!title) return;
-    
-    const episodeId = `structured_${title.replace(/[^\w]/g, '_')}`;
-    
-    if (!cache.seenEpisodes.includes(episodeId)) {
-        // Assuming structured episodes are Patreon exclusive
-        const patreonPostUrl = data.url || `https://www.patreon.com/lowlimitcashgames`;
-        const links = getEpisodeLinks(title, null, true, patreonPostUrl);
-        
-        await createEpisodeThread(channel, title, links, true, patreonPostUrl);
-        console.log(`✅ Created thread for structured episode: ${title}`);
-        
-        cache.seenEpisodes.push(episodeId);
-    }
-}
-
-async function findEpisodeIds(episodeTitle, postSlug) {
-    console.log(`🔍 Searching for episode IDs for: ${episodeTitle}`);
-    
-    try {
-        // Method 1: Search Apple Podcasts API (if available)
-        // Note: Apple doesn't have a public search API, but we can try iTunes Search
-        const cleanTitle = encodeURIComponent(episodeTitle.substring(0, 50));
-        const itunesSearchUrl = `https://itunes.apple.com/search?term=${cleanTitle}+Low+Limit+Cash+Games&entity=podcastEpisode&limit=5`;
-        
-        const itunesResponse = await fetch(itunesSearchUrl);
-        if (itunesResponse.ok) {
-            const itunesData = await itunesResponse.json();
-            if (itunesData.results && itunesData.results.length > 0) {
-                // Look for matching episode
-                const match = itunesData.results.find(result => 
-                    result.trackName && result.trackName.toLowerCase().includes(episodeTitle.toLowerCase().substring(0, 20))
-                );
-                if (match && match.trackId) {
-                    console.log(`🍎 Found Apple Podcasts episode ID: ${match.trackId}`);
-                    console.log(`📱 Full episode data: ${match.trackName} - ${match.trackViewUrl}`);
-                    return {
-                        apple: match.trackId,
-                        spotify: null // We'll try to find Spotify ID separately
-                    };
-                }
-            }
-        }
-        
-        // Method 2: Try to extract from RSS if we have a working one
-        // This would require the working Apple RSS URL
-        
-        console.log(`⚠️  Could not find specific episode IDs for: ${episodeTitle}`);
-        return { apple: null, spotify: null };
-        
-    } catch (error) {
-        console.error(`❌ Error finding episode IDs: ${error.message}`);
-        return { apple: null, spotify: null };
-    }
-}
-
-async function extractEpisodeIdsFromRSS(rssItem) {
-    try {
-        // RSS items often contain episode URLs or IDs in various fields
-        let appleId = null;
-        let spotifyId = null;
-        
-        // Look for iTunes episode ID in RSS item
-        if (rssItem.itunes && rssItem.itunes.episode) {
-            appleId = rssItem.itunes.episode;
-        }
-        
-        // Look for episode URLs in enclosure or link fields
-        if (rssItem.enclosure && rssItem.enclosure.url) {
-            // Sometimes episode IDs are in the URL
-            const urlMatch = rssItem.enclosure.url.match(/episode[_-]?(\d+)/i);
-            if (urlMatch) {
-                appleId = urlMatch[1];
-            }
-        }
-        
-        // Look in GUID for episode identifiers
-        if (rssItem.guid) {
-            const guidMatch = rssItem.guid.match(/(\d{10,})/);
-            if (guidMatch) {
-                appleId = guidMatch[1];
-            }
-        }
-        
-        console.log(`🔍 Extracted episode IDs from RSS - Apple: ${appleId}, Spotify: ${spotifyId}`);
-        return { apple: appleId, spotify: spotifyId };
-        
-    } catch (error) {
-        console.error(`❌ Error extracting episode IDs from RSS: ${error.message}`);
-        return { apple: null, spotify: null };
-    }
-}
-
 async function checkContent() {
     console.log('🔍 Checking for new content...');
-    console.log('📡 Checking Spreaker RSS for public episodes...');
-    await checkPodcast();
-    console.log('🕷️ Scraping Patreon page for all episodes...');
+    console.log('📡 Checking public RSS for free episodes...');
+    await checkPublicRSS();
+    console.log('🕷️ Scraping Patreon page for paid episodes...');
     await scrapePatreonPage();
     console.log('✅ Content check completed');
 }
@@ -399,7 +227,7 @@ client.once('ready', async () => {
     // Send startup message
     const channel = client.channels.cache.get(process.env.CHANNEL_ID);
     if (channel) {
-        await channel.send('🚀 **Enhanced poker content bot is online!**\n📡 Now monitoring both public episodes and Patreon content\n📝 Type `!help` for test commands');
+        await channel.send('🚀 **Low Limit Cash Games bot is online!**\n🎧 Now monitoring for new episodes - Patreon links only for paid content\n📝 Type `!help` for test commands');
     }
     
     // Schedule checks every 15 minutes
@@ -412,39 +240,67 @@ client.once('ready', async () => {
     }, 5000);
 });
 
-// Test commands
+// Test commands and message handling
 client.on('messageCreate', async (message) => {
     // Ignore bot messages
     if (message.author.bot) return;
     
-    // Only respond in your designated channel
-    if (message.channel.id !== process.env.CHANNEL_ID) return;
+    // Respond in any channel the bot is in (for testing)
     
-    // Test commands
-    if (message.content === '!test-rss') {
-        await message.reply('🔍 Testing RSS feed...');
+    if (message.content === '!test-format') {
+        const testTitle = "Test Episode: Advanced Cash Game Strategy";
+        const testUrl = "https://www.patreon.com/posts/test-12345";
+        
         try {
-            await checkPodcast();
-            await message.reply('✅ RSS check completed - check logs for details');
+            await createEpisodeThread(message.channel, testTitle, testUrl);
+            await message.reply('✅ Test thread created - check the format!');
         } catch (error) {
-            await message.reply(`❌ RSS test failed: ${error.message}`);
+            await message.reply(`❌ Test failed: ${error.message}`);
         }
     }
     
     if (message.content === '!test-patreon') {
         await message.reply('🕷️ Testing Patreon scraping...');
         try {
+            // For testing, we'll use the current channel instead of production channel
+            const originalChannelId = process.env.CHANNEL_ID;
+            process.env.CHANNEL_ID = message.channel.id; // Temporarily use test channel
+            
             await scrapePatreonPage();
+            
+            process.env.CHANNEL_ID = originalChannelId; // Restore original
             await message.reply('✅ Patreon scrape completed - check logs for details');
         } catch (error) {
             await message.reply(`❌ Patreon test failed: ${error.message}`);
         }
     }
     
-    if (message.content === '!test-both') {
-        await message.reply('🔍 Testing both RSS and Patreon...');
+    if (message.content === '!test-rss') {
+        await message.reply('🔍 Testing RSS feed...');
         try {
+            // For testing, we'll use the current channel instead of production channel
+            const originalChannelId = process.env.CHANNEL_ID;
+            process.env.CHANNEL_ID = message.channel.id; // Temporarily use test channel
+            
+            await checkPublicRSS();
+            
+            process.env.CHANNEL_ID = originalChannelId; // Restore original
+            await message.reply('✅ RSS check completed - check logs for details');
+        } catch (error) {
+            await message.reply(`❌ RSS test failed: ${error.message}`);
+        }
+    }
+    
+    if (message.content === '!test-both') {
+        await message.reply('🔍 Testing full content check...');
+        try {
+            // For testing, we'll use the current channel instead of production channel
+            const originalChannelId = process.env.CHANNEL_ID;
+            process.env.CHANNEL_ID = message.channel.id; // Temporarily use test channel
+            
             await checkContent();
+            
+            process.env.CHANNEL_ID = originalChannelId; // Restore original
             await message.reply('✅ Full content check completed');
         } catch (error) {
             await message.reply(`❌ Content check failed: ${error.message}`);
@@ -454,43 +310,15 @@ client.on('messageCreate', async (message) => {
     if (message.content === '!clear-cache') {
         try {
             const cache = {
-                lastPodcastCheck: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), // 24 hours ago
+                lastPodcastCheck: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
                 lastPatreonCheck: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
                 seenEpisodes: []
             };
             saveCache(cache);
-            await message.reply('🗑️ Cache cleared - bot will now check for "new" episodes from the last 24 hours');
+            await message.reply('🗑️ Cache cleared - will check for new episodes');
         } catch (error) {
             await message.reply(`❌ Cache clear failed: ${error.message}`);
         }
-    }
-    
-    if (message.content === '!test-links') {
-        // Test the new link generation
-        const testTitle = "Test Episode: Cash Game Strategy";
-        const testPatreonUrl = "https://www.patreon.com/posts/test-12345";
-        
-        const freeLinks = getEpisodeLinks(testTitle, null, false);
-        const patreonLinks = getEpisodeLinks(testTitle, null, true, testPatreonUrl);
-        
-        await message.reply({
-            embeds: [{
-                title: "Link Generation Test",
-                fields: [
-                    {
-                        name: "🆓 Free Episode Links",
-                        value: `Apple: ${freeLinks.apple}\nSpotify: ${freeLinks.spotify}`,
-                        inline: false
-                    },
-                    {
-                        name: "🔒 Patreon Episode Links", 
-                        value: `Patreon: ${patreonLinks.patreon}`,
-                        inline: false
-                    }
-                ],
-                color: 0x00ff00
-            }]
-        });
     }
     
     if (message.content === '!status') {
@@ -513,6 +341,11 @@ client.on('messageCreate', async (message) => {
                         name: "📚 Seen Episodes",
                         value: `${cache.seenEpisodes.length} episodes tracked`,
                         inline: true
+                    },
+                    {
+                        name: "🎯 Production Channel",
+                        value: `<#${process.env.CHANNEL_ID}>`,
+                        inline: true
                     }
                 ],
                 color: 0x0099ff,
@@ -521,40 +354,62 @@ client.on('messageCreate', async (message) => {
         });
     }
     
+    if (message.content === '!post' || message.content.startsWith('!post ')) {
+        const parts = message.content.split(' ');
+        if (parts.length >= 3) {
+            const title = parts.slice(1, -1).join(' ');
+            const url = parts[parts.length - 1];
+            
+            try {
+                await createEpisodeThread(message.channel, title, url);
+                await message.reply('✅ Episode posted manually');
+            } catch (error) {
+                await message.reply(`❌ Manual post failed: ${error.message}`);
+            }
+        } else {
+            await message.reply('❌ Usage: `!post Episode Title Here https://patreon.com/posts/12345`');
+        }
+    }
+    
     if (message.content === '!help') {
         await message.reply({
             embeds: [{
-                title: "🤖 Bot Test Commands",
-                description: "Use these commands to test the bot functionality:",
+                title: "🤖 Bot Commands",
+                description: "Test commands for the Low Limit Cash Games bot:",
                 fields: [
                     {
-                        name: "!test-rss",
-                        value: "Test RSS feed checking for public episodes",
+                        name: "!test-format",
+                        value: "Create a test thread to check formatting",
                         inline: false
                     },
                     {
                         name: "!test-patreon",
-                        value: "Test Patreon page scraping for exclusive episodes", 
+                        value: "Test Patreon scraping (safe - uses current channel)", 
+                        inline: false
+                    },
+                    {
+                        name: "!test-rss",
+                        value: "Test RSS feed (safe - uses current channel)",
                         inline: false
                     },
                     {
                         name: "!test-both",
-                        value: "Run full content check (both RSS and Patreon)",
+                        value: "Run full content check (safe - uses current channel)",
                         inline: false
                     },
                     {
-                        name: "!test-links",
-                        value: "Test link generation for both episode types",
+                        name: "!post Title Here URL",
+                        value: "Manually post an episode",
                         inline: false
                     },
                     {
                         name: "!clear-cache",
-                        value: "Clear episode cache (will reprocess recent episodes)",
+                        value: "Clear episode cache",
                         inline: false
                     },
                     {
                         name: "!status",
-                        value: "Show bot status and last check times",
+                        value: "Show bot status",
                         inline: false
                     }
                 ],
